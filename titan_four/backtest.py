@@ -33,8 +33,8 @@ class MomentumBacktest:
         max_drawdown = 0.0
 
         for idx in range(len(prices)):
-            window_prices = prices[max(0, idx - 7):idx + 1]
-            window_volumes = volumes[max(0, idx - 7):idx + 1]
+            window_prices = prices[:idx + 1]
+            window_volumes = volumes[:idx + 1]
             decision = self.strategy.evaluate(window_prices, window_volumes)
 
             if decision.signal == "buy" and position == 0:
@@ -63,7 +63,8 @@ class MomentumBacktest:
 
         final_value = cash + position * prices[-1]
         net_return = (final_value - self.starting_cash) / self.starting_cash
-        win_rate = wins / trades if trades > 0 else 0.0
+        closed_trades = wins + losses
+        win_rate = wins / closed_trades if closed_trades > 0 else 0.0
 
         return BacktestResult(
             trades=trades,

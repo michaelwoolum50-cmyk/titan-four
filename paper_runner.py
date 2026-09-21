@@ -1,10 +1,48 @@
 import datetime as dt
+import json
+import os
+import time
 from typing import Any, List
 
 import requests
 
 from titan_four.backtest import MomentumBacktest
 from titan_four.paper_trading import LiveReadinessGate
+
+CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache")
+CACHE_TTL_SECONDS = 6 * 3600  # 6 hours
+
+
+def _cache_path(product_id: str, granularity: int, hours: int) -> str:
+    safe_product = product_id.replace("/", "_")
+    return os.path.join(
+        CACHE_DIR, f"{safe_product}_{int(granularity)}_{int(hours)}.json"
+    )
+
+
+def _load_cache(path: str):
+    try:
+        if os.path.isfile(path) and (time.time() - os.path.getmtime(path)) < CACHE_TTL_SECONDS:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+            closes = payload.get("closes")
+            volumes = payload.get("volumes")
+            if isinstance(closes, list) and isinstance(volumes, list) and closes:
+                return [float(c) for c in closes], [float(v) for v in volumes]
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
+
+def _write_cache(path: str, closes: List[float], volumes: List[float]) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump({"closes": closes, "volumes": volumes}, fh)
+        os.replace(tmp_path, path)
+    except OSError:
+        pass
 
 
 def summarize_result(product_id: str, result: dict[str, Any]) -> dict[str, Any]:
@@ -25,6 +63,11 @@ def summarize_result(product_id: str, result: dict[str, Any]) -> dict[str, Any]:
 
 
 def fetch_candles(product_id: str, granularity: int = 300, hours: int = 24):
+    cache_path = _cache_path(product_id, granularity, hours)
+    cached = _load_cache(cache_path)
+    if cached is not None:
+        return cached
+
     max_candles = 300
     max_hours = max(1, max_candles * granularity // 3600)
 
@@ -60,6 +103,11 @@ def fetch_candles(product_id: str, granularity: int = 300, hours: int = 24):
 
     if not all_closes:
         raise ValueError(f"No candle data returned for {product_id}")
+    # Coinbase returns candles newest-first; reverse to chronological
+    # (oldest-first) order before returning and caching.
+    all_closes = all_closes[::-1]
+    all_volumes = all_volumes[::-1]
+    _write_cache(cache_path, all_closes, all_volumes)
     return all_closes, all_volumes
 
 

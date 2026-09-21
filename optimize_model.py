@@ -1,9 +1,22 @@
+"""Grid optimizer for the EMA-crossover CandidateStrategy (rebuilt 2026-09-21).
+
+Import-safe: importing this module does ZERO work (no network, no prints).
+All executable logic lives in main(), under __main__.
+Data comes from paper_runner.fetch_candles (cached 6h; each product fetched once).
+"""
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 from paper_runner import fetch_candles
 from titan_four.backtest import MomentumBacktest
 from titan_four.paper_trading import LiveReadinessGate
+
+
+@dataclass
+class Decision:
+    signal: str
+    confidence: float
+    reason: str
 
 
 @dataclass
@@ -29,7 +42,7 @@ class CandidateStrategy:
         prices = list(map(float, prices))
         volumes = list(map(float, volumes))
         if len(prices) < max(self.short_span, self.long_span):
-            return type('D', (), {'signal': 'hold', 'confidence': 0.0, 'reason': 'insufficient'})()
+            return Decision('hold', 0.0, 'insufficient')
 
         recent = prices[-self.short_span:]
         earlier = prices[-self.long_span:]
@@ -43,30 +56,65 @@ class CandidateStrategy:
         score = recent_return * 3.0 + spread * 10.0 + max(0.0, vol_ratio - 1.0) * 0.5
 
         if abs(spread) < self.spread_min and abs(recent_return) < self.min_return * 2.0:
-            return type('D', (), {'signal': 'hold', 'confidence': 0.5, 'reason': 'choppy'})()
+            return Decision('hold', 0.5, 'choppy')
 
-        if recent_return > self.min_return and spread > self.spread_min and vol_ratio >= self.min_vol_ratio and score > self.buy_threshold:
-            return type('D', (), {'signal': 'buy', 'confidence': min(max(0.55 + score, 0.0), 1.0), 'reason': 'buy_signal'})()
+        if (recent_return > self.min_return and spread > self.spread_min
+                and vol_ratio >= self.min_vol_ratio and score > self.buy_threshold):
+            return Decision('buy', min(max(0.55 + score, 0.0), 1.0), 'buy_signal')
 
-        if recent_return < -self.min_return and spread < -self.spread_min and vol_ratio >= self.min_vol_ratio and score < self.sell_threshold:
-            return type('D', (), {'signal': 'sell', 'confidence': min(max(0.55 + abs(score), 0.0), 1.0), 'reason': 'sell_signal'})()
+        if (recent_return < -self.min_return and spread < -self.spread_min
+                and vol_ratio >= self.min_vol_ratio and score < self.sell_threshold):
+            return Decision('sell', min(max(0.55 + abs(score), 0.0), 1.0), 'sell_signal')
 
-        return type('D', (), {'signal': 'hold', 'confidence': min(max(score, 0.0), 1.0), 'reason': 'neutral'})()
+        return Decision('hold', min(max(score, 0.0), 1.0), 'neutral')
 
 
+# Bounded grid (aim: full run finishes well under 10 minutes).
 PRODUCTS = ['BTC-USD', 'ETH-USD', 'SOL-USD']
+SHORT_SPANS = [5, 8, 12]
+LONG_SPANS = [20, 30, 50]
+SPREAD_MINS = [0.0001, 0.0003, 0.0006]
+BUY_THRESHOLDS = [0.002, 0.005, 0.01]
+MIN_RETURNS = [0.001, 0.002, 0.004]
+MIN_VOL_RATIOS = [0.7, 1.0]
+
+GRANULARITY = 300
+HOURS = 168
 
 
-def score_config(product, cfg):
-    closes, vols = fetch_candles(product, granularity=300, hours=168)
-    strategy = CandidateStrategy(**cfg)
+def build_configs():
+    configs = []
+    for short in SHORT_SPANS:
+        for long in LONG_SPANS:
+            if long <= short:
+                continue
+            for spread in SPREAD_MINS:
+                for buy in BUY_THRESHOLDS:
+                    for min_return in MIN_RETURNS:
+                        for vol_ratio in MIN_VOL_RATIOS:
+                            configs.append({
+                                'short_span': short,
+                                'long_span': long,
+                                'spread_min': spread,
+                                'buy_threshold': buy,
+                                'sell_threshold': -buy,
+                                'min_return': min_return,
+                                'min_vol_ratio': vol_ratio,
+                            })
+    return configs
+
+
+def score_config(strategy_cfg, closes, vols, product):
+    strategy = CandidateStrategy(**strategy_cfg)
     bt = MomentumBacktest(starting_cash=10000.0, position_fraction=0.2)
     bt.strategy = strategy
     result = bt.run(closes, vols)
-    gate = LiveReadinessGate().score(result.net_return, result.max_drawdown, result.win_rate, result.trades, 3)
+    gate = LiveReadinessGate().score(
+        result.net_return, result.max_drawdown, result.win_rate, result.trades, 3
+    )
     return {
         'product': product,
-        'cfg': cfg,
+        'cfg': strategy_cfg,
         'trades': result.trades,
         'wins': result.wins,
         'losses': result.losses,
@@ -81,39 +129,34 @@ def score_config(product, cfg):
 
 
 def main():
-    configs = []
-    for short in [5, 8, 10, 12]:
-        for long in [15, 20, 25, 30, 35, 40, 50]:
-            if long <= short:
-                continue
-            for spread in [0.00005, 0.0001, 0.0002, 0.00035, 0.0005, 0.0008]:
-                for buy in [0.001, 0.002, 0.003, 0.005, 0.008, 0.01, 0.012]:
-                    for min_return in [0.0004, 0.0008, 0.0012, 0.002, 0.003, 0.004]:
-                        for volume in [0.5, 0.7, 0.9, 1.1]:
-                            configs.append({
-                                'short_span': short,
-                                'long_span': long,
-                                'spread_min': spread,
-                                'buy_threshold': buy,
-                                'sell_threshold': -buy,
-                                'min_return': min_return,
-                                'min_vol_ratio': volume,
-                            })
-
+    configs = build_configs()
     all_results = []
     for product in PRODUCTS:
+        # Single fetch per product; cache makes this free on repeats.
+        closes, vols = fetch_candles(product, granularity=GRANULARITY, hours=HOURS)
         for cfg in configs:
-            all_results.append(score_config(product, cfg))
+            all_results.append(score_config(cfg, closes, vols, product))
 
     ranked = sorted(
         all_results,
-        key=lambda item: (item['ready'], item['score'], item['net_return'], item['win_rate'], item['trades']),
+        key=lambda item: (
+            item['ready'], item['score'], item['net_return'],
+            item['win_rate'], item['trades'],
+        ),
         reverse=True,
     )
 
-    print(json.dumps(ranked[:30], indent=2))
-    print('READY_COUNT', sum(1 for item in ranked if item['ready']))
-    print('TOP_POSITIVE', max((item for item in ranked if item['net_return'] > 0), key=lambda item: (item['net_return'], item['win_rate'], item['trades']), default=None))
+    ready_count = sum(1 for item in ranked if item['ready'])
+    best_positive = max(
+        (item for item in ranked if item['net_return'] > 0),
+        key=lambda item: (item['net_return'], item['win_rate'], item['trades']),
+        default=None,
+    )
+
+    print(json.dumps(ranked[:15], indent=2))
+    print('READY_COUNT', ready_count)
+    print('BEST_POSITIVE', json.dumps(best_positive))
+    print('TOTAL_CONFIGS', len(all_results))
 
 
 if __name__ == '__main__':
