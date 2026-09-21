@@ -19,10 +19,10 @@ class MomentumStrategy:
 
     def __init__(
         self,
-        buy_threshold=0.03,
-        sell_threshold=-0.03,
-        min_return=0.003,
-        min_sell_return=-0.003,
+        buy_threshold=0.003,
+        sell_threshold=-0.003,
+        min_return=0.0004,
+        min_sell_return=-0.0004,
     ):
         self.buy_threshold = buy_threshold
         self.sell_threshold = sell_threshold
@@ -49,8 +49,8 @@ class MomentumStrategy:
         earlier_avg = sum(earlier) / len(earlier)
         price_slope = (recent_avg - earlier_avg) / max(abs(earlier_avg), 1e-9)
         closing_pressure = (prices[-1] - earlier_avg) / max(abs(earlier_avg), 1e-9)
+        tail_pressure = (prices[-1] - earlier[-1]) / max(abs(earlier[-1]), 1e-9)
 
-        recent_volatility = statistics.pstdev(recent) / max(abs(recent_avg), 1e-9)
         recent_deltas = [
             (recent[i] - recent[i - 1]) / max(abs(recent[i - 1]), 1e-9)
             for i in range(1, len(recent))
@@ -62,20 +62,21 @@ class MomentumStrategy:
         volume_strength = recent_volume / max(avg_volume, 1e-9)
 
         score = (
-            recent_return * 1.5
-            + earlier_return * 0.5
-            + price_slope * 2.5
-            + closing_pressure * 1.5
-            + max(0.0, volume_strength - 1.0) * 0.3
+            recent_return * 3.0
+            + earlier_return * 1.25
+            + max(0.0, tail_pressure) * 12.0
+            + max(0.0, price_slope) * 10.0
+            + max(0.0, closing_pressure) * 5.0
+            + max(0.0, volume_strength - 1.0) * 1.0
         )
 
-        # Only block a genuinely flat or directionless market. A healthy uptrend
-        # with consistent positive pressure should still trigger a trade.
+        # Allow healthy momentum with short pullbacks to keep trading, while
+        # still suppressing flat or directionless periods.
         choppy = (
-            abs(price_slope) < 0.001
-            and abs(recent_return) < 0.003
-            and abs(closing_pressure) < 0.002
-            and directional_noise < 0.01
+            abs(recent_return) < 0.0015
+            and abs(tail_pressure) < 0.0002
+            and abs(closing_pressure) < 0.00018
+            and directional_noise < 0.006
         )
 
         if choppy:
@@ -83,16 +84,16 @@ class MomentumStrategy:
 
         buy_condition = (
             recent_return > self.min_return
-            and (price_slope > 0.0 or closing_pressure > 0.0)
-            and score > self.buy_threshold
-            and volume_strength >= 0.5
+            and (tail_pressure > 0.00005 or closing_pressure > 0.00008 or recent_return > earlier_return)
+            and score > self.buy_threshold * 0.7
+            and volume_strength >= 0.6
         )
 
         sell_condition = (
             recent_return < self.min_sell_return
-            and (price_slope < 0.0 or closing_pressure < 0.0)
-            and score < self.sell_threshold
-            and volume_strength >= 0.5
+            and (tail_pressure < -0.00005 or closing_pressure < -0.00008 or recent_return < earlier_return)
+            and score < self.sell_threshold * 0.7
+            and volume_strength >= 0.6
         )
 
         if buy_condition:

@@ -24,7 +24,8 @@ def fetch_live_ticks(product_id: str, trade_limit: int = 100, samples: int = 5) 
             break
         prices.extend(float(item["price"]) for item in data)
         time.sleep(0.5)
-    return prices[-(trade_limit * samples):]
+    ordered = prices[-(trade_limit * samples):]
+    return list(reversed(ordered))
 
 
 def evaluate_live_ticks(product_id: str, prices: list[float]) -> dict[str, Any]:

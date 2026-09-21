@@ -2,7 +2,7 @@ import json
 
 from paper_runner import fetch_candles
 from titan_four.backtest import MomentumBacktest
-from titan_four.strategy import MomentumDecision, MomentumStrategy, StrategyDecision
+from titan_four.strategy import StrategyDecision
 from titan_four.paper_trading import LiveReadinessGate
 
 
@@ -51,13 +51,13 @@ class SearchStrategy:
 
 products = ['BTC-USD']
 configs = []
-for short in [5, 8, 10, 12, 14]:
-    for long in [18, 21, 30, 40, 50, 60]:
+for short in [5, 8, 10]:
+    for long in [18, 21, 30]:
         if long <= short:
             continue
-        for buy in [0.004, 0.006, 0.008, 0.01, 0.015, 0.02, 0.03, 0.05]:
-            for sell in [-0.004, -0.006, -0.008, -0.01, -0.015, -0.02, -0.03, -0.05]:
-                for min_return in [0.001, 0.002, 0.003, 0.004, 0.006, 0.008, 0.01]:
+        for buy in [0.003, 0.005, 0.008, 0.01]:
+            for sell in [-0.003, -0.005, -0.008, -0.01]:
+                for min_return in [0.003, 0.005, 0.008]:
                     configs.append((short, long, buy, sell, min_return))
 
 all_results = []
@@ -88,6 +88,8 @@ for product in products:
         })
 
 ranked = sorted(all_results, key=lambda x: (x['ready'], x['score'], x['net_return'], x['win_rate'], x['trades']), reverse=True)
-print(json.dumps(ranked[:20], indent=2))
 print('READY_COUNT=', sum(1 for r in ranked if r['ready']))
-print('BEST=', max((r for r in ranked if r['net_return'] > 0), key=lambda r: (r['net_return'], r['win_rate'], r['trades']), default=None))
+print('BEST_POSITIVE=', max((r for r in ranked if r['net_return'] > 0), key=lambda r: (r['net_return'], r['win_rate'], r['trades']), default=None))
+if not any(r['ready'] for r in ranked):
+    print('NO_READY_CANDIDATES=TRUE')
+    print('TOP_CANDIDATE=', ranked[0] if ranked else None)
